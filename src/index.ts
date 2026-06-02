@@ -9,7 +9,6 @@ import type { WalletMetrics } from './models/types.js';
 import { sleep } from './utils/evaluation.js';
 
 const KELLY_FRACTION = parseFloat(process.env.KELLY_FRACTION ?? '0.5');
-const MAX_POSITION_FRAC = parseFloat(process.env.MAX_POSITION_FRAC ?? '0.1');
 const TEST_BANKROLL_USD = parseFloat(process.env.TEST_BANKROLL_USD ?? '10000');
 const POLL_INTERVAL_MS = parseFloat(process.env.POLL_INTERVAL_S ?? '60') * 1000;
 const REFRESH_INTERVAL_MS = parseFloat(process.env.REFRESH_INTERVAL_H ?? '24') * 60 * 60 * 1000;
@@ -80,13 +79,13 @@ async function runTest() {
     process.exit(1);
   }
 
-  const trader = createPaperTrader(TEST_BANKROLL_USD, KELLY_FRACTION, MAX_POSITION_FRAC);
+  const trader = createPaperTrader(TEST_BANKROLL_USD, KELLY_FRACTION);
   const client = getPublicClient();
   const trackedPositions = new Map<string, Set<string>>();
 
   await trader.resume();
   console.log(`\n[TEST] Paper trading — watching ${smartWallets.length} smart wallets.`);
-  console.log(`[TEST] Bankroll: $${TEST_BANKROLL_USD} | Kelly fraction: ${KELLY_FRACTION} | Max position: ${(MAX_POSITION_FRAC * 100).toFixed(1)}% of bankroll`);
+  console.log(`[TEST] Bankroll: $${TEST_BANKROLL_USD} | Kelly fraction: ${KELLY_FRACTION} | Sizing: wallet % × Kelly`);
   console.log(`[TEST] Polling every ${POLL_INTERVAL_MS / 1000}s. Ctrl+C to stop.\n`);
 
   let initialized = false;
@@ -94,26 +93,32 @@ async function runTest() {
   async function poll() {
     for (const wallet of smartWallets) {
       try {
-        const currentIds = new Set<string>();
+        type PositionEntry = { id: string; tokenId: string; title: string; outcome: string; entryPrice: number; totalBought: number };
+        const allPositions: PositionEntry[] = [];
+
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         for await (const page of client.listPositions({ user: wallet.address as any, pageSize: 50 })) {
           for (const pos of page.items) {
-            const id = pos.conditionId;
-            currentIds.add(id);
-            // Only signal if wallet has been seen before (has a baseline) and this id is new
-            const walletKnown = trackedPositions.has(wallet.address);
-            const isNew = walletKnown && !trackedPositions.get(wallet.address)!.has(id);
-            if (initialized && isNew) {
-              await trader.onSignal(
-                id,
-                pos.tokenId ?? '',
-                pos.title ?? id,
-                pos.outcome ?? 'Yes',
-                parseFloat((pos.avgPrice as string | null) ?? '0.5'),
-                wallet.address,
-                wallet.avgEdge,
-              );
-            }
+            allPositions.push({
+              id: pos.conditionId,
+              tokenId: pos.tokenId ?? '',
+              title: pos.title ?? pos.conditionId,
+              outcome: pos.outcome ?? 'Yes',
+              entryPrice: parseFloat((pos.avgPrice as string | null) ?? '0.5'),
+              totalBought: parseFloat((pos.totalBought as string | null) ?? '0'),
+            });
+          }
+        }
+
+        const totalDeployed = allPositions.reduce((s, p) => s + p.totalBought, 0);
+        const currentIds = new Set(allPositions.map((p) => p.id));
+        const walletKnown = trackedPositions.has(wallet.address);
+
+        for (const p of allPositions) {
+          const isNew = walletKnown && !trackedPositions.get(wallet.address)!.has(p.id);
+          if (initialized && isNew) {
+            const walletFraction = totalDeployed > 0 ? p.totalBought / totalDeployed : 0;
+            await trader.onSignal(p.id, p.tokenId, p.title, p.outcome, p.entryPrice, wallet.address, walletFraction);
           }
         }
 
