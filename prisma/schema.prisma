@@ -1,0 +1,59 @@
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Wallet {
+  address         String          @id
+  userName        String?
+  classification  String
+  smartScore      Float
+  kellyEfficiency Float
+  winRate         Float
+  avgEdge         Float
+  tradeCount      Int
+  firstSeen       DateTime        @default(now())
+  lastUpdated     DateTime        @updatedAt
+  scoreHistory    ScoreSnapshot[]
+
+  @@index([classification, smartScore])
+}
+
+model ScoreSnapshot {
+  id              String   @id @default(uuid())
+  walletAddress   String
+  wallet          Wallet   @relation(fields: [walletAddress], references: [address])
+  classification  String
+  smartScore      Float
+  kellyEfficiency Float
+  winRate         Float
+  avgEdge         Float
+  tradeCount      Int
+  recordedAt      DateTime @default(now())
+
+  @@index([walletAddress, recordedAt])
+}
+
+model PaperTrade {
+  id              String    @id @default(uuid())
+  conditionId     String
+  trackedWallet   String
+  title           String
+  outcome         String
+  tokenId         String
+  entryPrice      Float
+  sizeUsd         Float
+  kellyFrac       Float
+  status          String    // 'open' | 'closed'
+  exitPrice       Float?
+  pnl             Float?
+  openedAt        DateTime  @default(now())
+  closedAt        DateTime?
+
+  @@index([status])
+  @@index([trackedWallet])
+}
