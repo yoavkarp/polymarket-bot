@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { discoverWallets } from './services/walletDiscovery.js';
 import { analyzeWallet } from './services/walletAnalysis.js';
 import { upsertWallet, getSmartWallets, pruneNonSmartWallets } from './db/walletStore.js';
+import { getConfig, setConfig } from './db/configStore.js';
 import { createPaperTrader } from './services/paperTrader.js';
 import { startCopyTrading } from './services/copyTrader.js';
 import { getPublicClient } from './clients/polymarket.js';
@@ -10,6 +11,7 @@ import { sleep } from './utils/evaluation.js';
 
 const KELLY_FRACTION = parseFloat(process.env.KELLY_FRACTION ?? '0.5');
 const TEST_BANKROLL_USD = parseFloat(process.env.TEST_BANKROLL_USD ?? '10000');
+const PRICE_MATCH_TOLERANCE = parseFloat(process.env.PRICE_MATCH_TOLERANCE ?? '0.02');
 const POLL_INTERVAL_MS = parseFloat(process.env.POLL_INTERVAL_S ?? '60') * 1000;
 const REFRESH_INTERVAL_MS = parseFloat(process.env.REFRESH_INTERVAL_H ?? '24') * 60 * 60 * 1000;
 
@@ -53,6 +55,7 @@ async function runAnalyze() {
     return;
   }
 
+  await setConfig('lastRefreshAt', new Date().toISOString());
   console.log(`\n=== Smart Wallets (${smart.length}) ===`);
   for (const w of smart) {
     const name = w.userName ? ` (${w.userName})` : '';
@@ -81,7 +84,8 @@ async function runTest() {
 
   const trader = createPaperTrader(TEST_BANKROLL_USD, KELLY_FRACTION);
   const client = getPublicClient();
-  const trackedPositions = new Map<string, Set<string>>();
+  // wallet address → (conditionId → last known curPrice)
+  const trackedPositions = new Map<string, Map<string, number>>();
 
   await trader.resume();
   console.log(`\n[TEST] Paper trading — watching ${smartWallets.length} smart wallets.`);
@@ -93,7 +97,7 @@ async function runTest() {
   async function poll() {
     for (const wallet of smartWallets) {
       try {
-        type PositionEntry = { id: string; tokenId: string; title: string; outcome: string; entryPrice: number; totalBought: number };
+        type PositionEntry = { id: string; tokenId: string; title: string; outcome: string; avgPrice: number; curPrice: number; totalBought: number };
         const allPositions: PositionEntry[] = [];
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -104,36 +108,37 @@ async function runTest() {
               tokenId: pos.tokenId ?? '',
               title: pos.title ?? pos.conditionId,
               outcome: pos.outcome ?? 'Yes',
-              entryPrice: parseFloat((pos.avgPrice as string | null) ?? '0.5'),
+              avgPrice: parseFloat((pos.avgPrice as string | null) ?? '0.5'),
+              curPrice: parseFloat((pos.curPrice as string | null) ?? '0.5'),
               totalBought: parseFloat((pos.totalBought as string | null) ?? '0'),
             });
           }
         }
 
         const totalDeployed = allPositions.reduce((s, p) => s + p.totalBought, 0);
-        const currentIds = new Set(allPositions.map((p) => p.id));
+        const currentMap = new Map(allPositions.map((p) => [p.id, p.curPrice]));
         const walletKnown = trackedPositions.has(wallet.address);
+        const prev = trackedPositions.get(wallet.address);
 
         for (const p of allPositions) {
-          const isNew = walletKnown && !trackedPositions.get(wallet.address)!.has(p.id);
-          if (initialized && isNew) {
+          const isNew = walletKnown && !prev!.has(p.id);
+          const priceUnchanged = Math.abs(p.curPrice - p.avgPrice) <= PRICE_MATCH_TOLERANCE;
+          const shouldSignal = initialized ? isNew : (!walletKnown && priceUnchanged);
+          if (shouldSignal) {
             const walletFraction = totalDeployed > 0 ? p.totalBought / totalDeployed : 0;
-            await trader.onSignal(p.id, p.tokenId, p.title, p.outcome, p.entryPrice, wallet.address, walletFraction);
+            await trader.onSignal(p.id, p.tokenId, p.title, p.outcome, p.curPrice, wallet.address, walletFraction);
           }
         }
 
-        if (initialized) {
-          const prev = trackedPositions.get(wallet.address);
-          if (prev) {
-            for (const id of prev) {
-              if (!currentIds.has(id)) {
-                await trader.onClose(id, 1.0);
-              }
+        if (initialized && prev) {
+          for (const [id, lastPrice] of prev) {
+            if (!currentMap.has(id)) {
+              await trader.onClose(id, lastPrice);
             }
           }
         }
 
-        trackedPositions.set(wallet.address, currentIds);
+        trackedPositions.set(wallet.address, currentMap);
       } catch {
         // Per-wallet errors are non-fatal
       }
@@ -141,26 +146,43 @@ async function runTest() {
 
     if (!initialized) {
       initialized = true;
-      const total = [...trackedPositions.values()].reduce((n, s) => n + s.size, 0);
-      console.log(`[TEST] Baseline snapshot: ${total} pre-existing position(s) ignored. Watching for new entries.`);
+      const total = [...trackedPositions.values()].reduce((n, m) => n + m.size, 0);
+      console.log(`[TEST] Baseline snapshot: ${total} pre-existing position(s) scanned (price-matched ones copied, rest ignored).`);
     }
 
     const walletSummary = smartWallets
-      .map((w) => `${w.address.slice(0, 10)}: ${trackedPositions.get(w.address)?.size ?? 0}`)
+      .map((w) => `${w.address.slice(0, 10)}: ${trackedPositions.get(w.address)?.size ?? 0} positions`)
       .join(' | ');
     console.log(`[WALLETS] ${walletSummary}`);
   }
 
   async function refreshWallets() {
-    console.log('\n[TEST] Daily refresh — re-running wallet analysis...');
+    console.log('\n[TEST] Wallet refresh — re-running analysis...');
     await runAnalyze();
     smartWallets = await getSmartWallets();
     console.log(`[TEST] Refresh complete — now watching ${smartWallets.length} smart wallet(s).`);
+    setTimeout(refreshWallets, REFRESH_INTERVAL_MS);
+  }
+
+  async function scheduleRefresh() {
+    const lastRefreshStr = await getConfig('lastRefreshAt');
+    const msSinceLast = lastRefreshStr
+      ? Date.now() - new Date(lastRefreshStr).getTime()
+      : Infinity;
+    const msUntilNext = Math.max(0, REFRESH_INTERVAL_MS - msSinceLast);
+
+    if (msUntilNext === 0) {
+      await refreshWallets();
+    } else {
+      const hoursLeft = (msUntilNext / 3_600_000).toFixed(1);
+      console.log(`[TEST] Next wallet refresh in ${hoursLeft}h (last ran ${lastRefreshStr})`);
+      setTimeout(refreshWallets, msUntilNext);
+    }
   }
 
   await poll();
   setInterval(poll, POLL_INTERVAL_MS);
-  setInterval(refreshWallets, REFRESH_INTERVAL_MS);
+  await scheduleRefresh();
 }
 
 async function main() {

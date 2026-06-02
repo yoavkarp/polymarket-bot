@@ -11,16 +11,24 @@ export async function upsertWallet(metrics: WalletMetrics) {
     avgEdge: metrics.avgEdge,
     tradeCount: metrics.tradeCount,
   };
-  await prisma.$transaction([
-    prisma.wallet.upsert({
-      where: { address: metrics.address },
-      update: { userName: metrics.userName, ...scores },
-      create: { address: metrics.address, userName: metrics.userName, ...scores },
-    }),
-    prisma.scoreSnapshot.create({
+
+  await prisma.wallet.upsert({
+    where: { address: metrics.address },
+    update: { userName: metrics.userName, ...scores },
+    create: { address: metrics.address, userName: metrics.userName, ...scores },
+  });
+
+  const last = await prisma.scoreSnapshot.findFirst({
+    where: { walletAddress: metrics.address },
+    orderBy: { recordedAt: 'desc' },
+  });
+
+  const changed = !last || Math.abs(last.smartScore - metrics.smartScore) > 0.001;
+  if (changed) {
+    await prisma.scoreSnapshot.create({
       data: { walletAddress: metrics.address, ...scores },
-    }),
-  ]);
+    });
+  }
 }
 
 export async function getSmartWallets() {

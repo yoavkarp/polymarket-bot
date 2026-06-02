@@ -38,6 +38,12 @@ model ScoreSnapshot {
   @@index([walletAddress, recordedAt])
 }
 
+model Config {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
 model PaperTrade {
   id              String    @id @default(uuid())
   conditionId     String
