@@ -10,6 +10,7 @@ import type { WalletMetrics } from './models/types.js';
 import { sleep } from './utils/evaluation.js';
 
 const KELLY_FRACTION = parseFloat(process.env.KELLY_FRACTION ?? '0.5');
+const MAX_TOTAL_EXPOSURE = parseFloat(process.env.MAX_TOTAL_EXPOSURE ?? '0.5');
 const TEST_BANKROLL_USD = parseFloat(process.env.TEST_BANKROLL_USD ?? '10000');
 const PRICE_MATCH_TOLERANCE = parseFloat(process.env.PRICE_MATCH_TOLERANCE ?? '0.02');
 const POLL_INTERVAL_MS = parseFloat(process.env.POLL_INTERVAL_S ?? '60') * 1000;
@@ -82,14 +83,14 @@ async function runTest() {
     process.exit(1);
   }
 
-  const trader = createPaperTrader(TEST_BANKROLL_USD, KELLY_FRACTION);
+  const trader = createPaperTrader(TEST_BANKROLL_USD, KELLY_FRACTION, MAX_TOTAL_EXPOSURE);
   const client = getPublicClient();
   // wallet address → (conditionId → last known curPrice)
   const trackedPositions = new Map<string, Map<string, number>>();
 
   await trader.resume();
   console.log(`\n[TEST] Paper trading — watching ${smartWallets.length} smart wallets.`);
-  console.log(`[TEST] Bankroll: $${TEST_BANKROLL_USD} | Kelly fraction: ${KELLY_FRACTION} | Sizing: wallet % × Kelly`);
+  console.log(`[TEST] Portfolio: $${TEST_BANKROLL_USD} | Kelly: ${KELLY_FRACTION} | Max exposure: ${(MAX_TOTAL_EXPOSURE * 100).toFixed(0)}%`);
   console.log(`[TEST] Polling every ${POLL_INTERVAL_MS / 1000}s. Ctrl+C to stop.\n`);
 
   let initialized = false;

@@ -11,8 +11,10 @@ interface VirtualPosition {
   outcome: string;
 }
 
-export function createPaperTrader(bankrollUsd: number, kellyFrac: number) {
-  let bankroll = bankrollUsd;
+export function createPaperTrader(bankrollUsd: number, kellyFrac: number, maxTotalExposure: number) {
+  // portfolioValue = true wealth, updated only on realized P&L (not on entry)
+  let portfolioValue = bankrollUsd;
+  let totalDeployed = 0;
   const positions = new Map<string, VirtualPosition>();
 
   async function onSignal(
@@ -25,20 +27,25 @@ export function createPaperTrader(bankrollUsd: number, kellyFrac: number) {
     walletFraction: number,
   ) {
     if (positions.has(conditionId)) return;
-    if (walletFraction <= 0 || bankroll < 1) return;
+    if (walletFraction <= 0 || portfolioValue < 1) return;
 
-    const sizeUsd = Math.min(bankroll * walletFraction * kellyFrac, bankroll);
+    const sizeUsd = portfolioValue * walletFraction * kellyFrac;
     if (sizeUsd < 1) return;
 
-    bankroll -= sizeUsd;
+    // Don't exceed max total exposure
+    if (totalDeployed + sizeUsd > portfolioValue * maxTotalExposure) return;
+
+    totalDeployed += sizeUsd;
     const pos: VirtualPosition = { conditionId, trackedWallet, title, tokenId, entryPrice, sizeUsd, fraction: walletFraction, outcome };
     positions.set(conditionId, pos);
 
     await openPaperTrade({ conditionId, trackedWallet, title, outcome, tokenId, entryPrice, sizeUsd, kellyFrac: walletFraction });
 
+    const exposurePct = ((totalDeployed / portfolioValue) * 100).toFixed(1);
     console.log(
       `[TEST] BUY  "${title.slice(0, 55)}" ${outcome} @ ${entryPrice.toFixed(3)}` +
-      ` | $${sizeUsd.toFixed(2)} (wallet ${(walletFraction * 100).toFixed(1)}% × Kelly ${kellyFrac}) | tracked: ${trackedWallet.slice(0, 10)}`,
+      ` | $${sizeUsd.toFixed(2)} (wallet ${(walletFraction * 100).toFixed(1)}% × Kelly ${kellyFrac})` +
+      ` | exposure ${exposurePct}% | tracked: ${trackedWallet.slice(0, 10)}`,
     );
     await printStatus();
   }
@@ -48,7 +55,9 @@ export function createPaperTrader(bankrollUsd: number, kellyFrac: number) {
     if (!pos) return;
 
     const pnl = pos.sizeUsd * (exitPrice / pos.entryPrice - 1);
-    bankroll += pos.sizeUsd + pnl;
+    // Only here do we update true portfolio value
+    portfolioValue += pnl;
+    totalDeployed -= pos.sizeUsd;
     positions.delete(conditionId);
 
     await closePaperTrade(conditionId, exitPrice, pnl);
@@ -63,21 +72,27 @@ export function createPaperTrader(bankrollUsd: number, kellyFrac: number) {
 
   async function printStatus() {
     const summary = await getPaperTradeSummary();
-    const pct = summary.totalDeployed > 0
-      ? ((summary.totalPnl / summary.totalDeployed) * 100).toFixed(1)
-      : '0.0';
+    const exposurePct = ((totalDeployed / portfolioValue) * 100).toFixed(1);
     const wr = summary.count > 0 ? (summary.winRate * 100).toFixed(1) : '—';
     const sign = summary.totalPnl >= 0 ? '+' : '';
     console.log(
-      `[TEST] Bankroll: $${bankroll.toFixed(2)}` +
-      ` | Closed P&L: ${sign}$${summary.totalPnl.toFixed(2)} (${sign}${pct}%)` +
+      `[TEST] Portfolio: $${portfolioValue.toFixed(2)}` +
+      ` | Deployed: $${totalDeployed.toFixed(2)} (${exposurePct}%)` +
+      ` | Closed P&L: ${sign}$${summary.totalPnl.toFixed(2)}` +
       ` | Win rate: ${wr}% (${summary.count} closed)` +
       ` | Open: ${positions.size}`,
     );
   }
 
   async function resume() {
-    const open = await getOpenPaperTrades();
+    const [open, summary] = await Promise.all([getOpenPaperTrades(), getPaperTradeSummary()]);
+
+    // Reconstruct true portfolio value: initial bankroll + all realized P&L so far
+    portfolioValue = bankrollUsd + summary.totalPnl;
+
+    // Reconstruct total deployed from open positions
+    totalDeployed = open.reduce((s, t) => s + t.sizeUsd, 0);
+
     for (const t of open) {
       positions.set(t.conditionId, {
         conditionId: t.conditionId,
@@ -89,10 +104,10 @@ export function createPaperTrader(bankrollUsd: number, kellyFrac: number) {
         fraction: t.kellyFrac,
         outcome: t.outcome,
       });
-      bankroll -= t.sizeUsd;
     }
+
     if (open.length > 0) {
-      console.log(`[TEST] Resumed ${open.length} open position(s) from previous session.`);
+      console.log(`[TEST] Resumed ${open.length} open position(s) | Portfolio: $${portfolioValue.toFixed(2)} | Deployed: $${totalDeployed.toFixed(2)}`);
     }
   }
 
