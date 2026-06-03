@@ -5,6 +5,8 @@ import { upsertWallet, getSmartWallets, pruneNonSmartWallets } from './db/wallet
 import { getConfig, setConfig } from './db/configStore.js';
 import { createPaperTrader } from './services/paperTrader.js';
 import { startCopyTrading } from './services/copyTrader.js';
+import { startApiServer } from './api/server.js';
+import { botEvents } from './api/events.js';
 import { getPublicClient } from './clients/polymarket.js';
 import type { WalletMetrics } from './models/types.js';
 import { sleep } from './utils/evaluation.js';
@@ -12,6 +14,7 @@ import { sleep } from './utils/evaluation.js';
 const KELLY_FRACTION = parseFloat(process.env.KELLY_FRACTION ?? '0.5');
 const MAX_TOTAL_EXPOSURE = parseFloat(process.env.MAX_TOTAL_EXPOSURE ?? '0.5');
 const TEST_BANKROLL_USD = parseFloat(process.env.TEST_BANKROLL_USD ?? '10000');
+const API_PORT = parseInt(process.env.API_PORT ?? '3000');
 const PRICE_MATCH_TOLERANCE = parseFloat(process.env.PRICE_MATCH_TOLERANCE ?? '0.02');
 const POLL_INTERVAL_MS = parseFloat(process.env.POLL_INTERVAL_S ?? '60') * 1000;
 const REFRESH_INTERVAL_MS = parseFloat(process.env.REFRESH_INTERVAL_H ?? '24') * 60 * 60 * 1000;
@@ -57,6 +60,7 @@ async function runAnalyze() {
   }
 
   await setConfig('lastRefreshAt', new Date().toISOString());
+  botEvents.emit('wallets-updated', { smartCount: smart.length, totalScored: results.length });
   console.log(`\n=== Smart Wallets (${smart.length}) ===`);
   for (const w of smart) {
     const name = w.userName ? ` (${w.userName})` : '';
@@ -88,6 +92,7 @@ async function runTest() {
   // wallet address → (conditionId → last known curPrice)
   const trackedPositions = new Map<string, Map<string, number>>();
 
+  startApiServer(API_PORT);
   await trader.resume();
   console.log(`\n[TEST] Paper trading — watching ${smartWallets.length} smart wallets.`);
   console.log(`[TEST] Portfolio: $${TEST_BANKROLL_USD} | Kelly: ${KELLY_FRACTION} | Max exposure: ${(MAX_TOTAL_EXPOSURE * 100).toFixed(0)}%`);

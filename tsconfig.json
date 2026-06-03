@@ -7,8 +7,13 @@
     "strict": true,
     "skipLibCheck": true,
     "outDir": "dist",
+    "noEmit": true,
     "rootDir": "src",
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
-  "include": ["src/**/*"]
+  "include": [
+    "src/**/*"
+  ]
 }

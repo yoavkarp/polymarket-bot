@@ -1,4 +1,5 @@
 import { openPaperTrade, closePaperTrade, getPaperTradeSummary, getOpenPaperTrades } from '../db/paperStore.js';
+import { botEvents } from '../api/events.js';
 
 interface VirtualPosition {
   conditionId: string;
@@ -41,12 +42,13 @@ export function createPaperTrader(bankrollUsd: number, kellyFrac: number, maxTot
 
     await openPaperTrade({ conditionId, trackedWallet, title, outcome, tokenId, entryPrice, sizeUsd, kellyFrac: walletFraction });
 
-    const exposurePct = ((totalDeployed / portfolioValue) * 100).toFixed(1);
+    const exposurePct = (totalDeployed / portfolioValue) * 100;
     console.log(
       `[TEST] BUY  "${title.slice(0, 55)}" ${outcome} @ ${entryPrice.toFixed(3)}` +
       ` | $${sizeUsd.toFixed(2)} (wallet ${(walletFraction * 100).toFixed(1)}% × Kelly ${kellyFrac})` +
-      ` | exposure ${exposurePct}% | tracked: ${trackedWallet.slice(0, 10)}`,
+      ` | exposure ${exposurePct.toFixed(1)}% | tracked: ${trackedWallet.slice(0, 10)}`,
     );
+    botEvents.emit('trade-opened', { conditionId, title, outcome, entryPrice, sizeUsd, walletFraction, trackedWallet, exposurePct });
     await printStatus();
   }
 
@@ -67,21 +69,31 @@ export function createPaperTrader(bankrollUsd: number, kellyFrac: number, maxTot
       `[TEST] SELL "${pos.title.slice(0, 55)}" @ ${exitPrice.toFixed(3)}` +
       ` | ${sign}$${pnl.toFixed(2)}`,
     );
+    botEvents.emit('trade-closed', { conditionId, title: pos.title, exitPrice, pnl });
     await printStatus();
   }
 
   async function printStatus() {
     const summary = await getPaperTradeSummary();
-    const exposurePct = ((totalDeployed / portfolioValue) * 100).toFixed(1);
+    const exposurePct = (totalDeployed / portfolioValue) * 100;
     const wr = summary.count > 0 ? (summary.winRate * 100).toFixed(1) : '—';
     const sign = summary.totalPnl >= 0 ? '+' : '';
     console.log(
       `[TEST] Portfolio: $${portfolioValue.toFixed(2)}` +
-      ` | Deployed: $${totalDeployed.toFixed(2)} (${exposurePct}%)` +
+      ` | Deployed: $${totalDeployed.toFixed(2)} (${exposurePct.toFixed(1)}%)` +
       ` | Closed P&L: ${sign}$${summary.totalPnl.toFixed(2)}` +
       ` | Win rate: ${wr}% (${summary.count} closed)` +
       ` | Open: ${positions.size}`,
     );
+    botEvents.emit('portfolio-updated', {
+      portfolioValue,
+      totalDeployed,
+      exposurePct,
+      openPositions: positions.size,
+      totalPnl: summary.totalPnl,
+      winRate: summary.winRate,
+      closedCount: summary.count,
+    });
   }
 
   async function resume() {
