@@ -1,8 +1,9 @@
 import 'dotenv/config';
 import { discoverWallets } from './services/walletDiscovery.js';
 import { analyzeWallet } from './services/walletAnalysis.js';
-import { upsertWallet, getSmartWallets, pruneNonSmartWallets } from './db/walletStore.js';
+import { upsertWallet, getSmartWallets, pruneNonSmartWallets, deleteWallet } from './db/walletStore.js';
 import { getConfig, setConfig } from './db/configStore.js';
+import { getOpenPaperTrades, updateOpenTradePrices } from './db/paperStore.js';
 import { createPaperTrader } from './services/paperTrader.js';
 import { startCopyTrading } from './services/copyTrader.js';
 import { startApiServer } from './api/server.js';
@@ -99,27 +100,45 @@ async function runTest() {
   console.log(`[TEST] Polling every ${POLL_INTERVAL_MS / 1000}s. Ctrl+C to stop.\n`);
 
   let initialized = false;
+  const failStrikes = new Map<string, number>();
+  const MAX_STRIKES = 3;
+
+  const WALLET_TIMEOUT_MS = 15_000;
+
+  type PositionEntry = { id: string; tokenId: string; title: string; outcome: string; avgPrice: number; curPrice: number; totalBought: number };
+
+  async function fetchPositions(address: string): Promise<PositionEntry[]> {
+    const collect = async () => {
+      const results: PositionEntry[] = [];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      for await (const page of client.listPositions({ user: address as any, pageSize: 50 })) {
+        for (const pos of page.items) {
+          results.push({
+            id: pos.conditionId,
+            tokenId: pos.tokenId ?? '',
+            title: pos.title ?? pos.conditionId,
+            outcome: pos.outcome ?? 'Yes',
+            avgPrice: parseFloat((pos.avgPrice as string | null) ?? '0.5'),
+            curPrice: parseFloat((pos.curPrice as string | null) ?? '0.5'),
+            totalBought: parseFloat((pos.totalBought as string | null) ?? '0'),
+          });
+        }
+      }
+      return results;
+    };
+
+    const timeout = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('timeout')), WALLET_TIMEOUT_MS),
+    );
+
+    return Promise.race([collect(), timeout]);
+  }
 
   async function poll() {
+    console.log(`[TEST] Polling ${smartWallets.length} wallet(s)...`);
     for (const wallet of smartWallets) {
       try {
-        type PositionEntry = { id: string; tokenId: string; title: string; outcome: string; avgPrice: number; curPrice: number; totalBought: number };
-        const allPositions: PositionEntry[] = [];
-
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        for await (const page of client.listPositions({ user: wallet.address as any, pageSize: 50 })) {
-          for (const pos of page.items) {
-            allPositions.push({
-              id: pos.conditionId,
-              tokenId: pos.tokenId ?? '',
-              title: pos.title ?? pos.conditionId,
-              outcome: pos.outcome ?? 'Yes',
-              avgPrice: parseFloat((pos.avgPrice as string | null) ?? '0.5'),
-              curPrice: parseFloat((pos.curPrice as string | null) ?? '0.5'),
-              totalBought: parseFloat((pos.totalBought as string | null) ?? '0'),
-            });
-          }
-        }
+        const allPositions = await fetchPositions(wallet.address);
 
         const totalDeployed = allPositions.reduce((s, p) => s + p.totalBought, 0);
         const currentMap = new Map(allPositions.map((p) => [p.id, p.curPrice]));
@@ -137,6 +156,15 @@ async function runTest() {
         }
 
         if (initialized && prev) {
+          for (const p of allPositions) {
+            // Detect market resolution: curPrice hits 0 or 1 before the wallet redeems.
+            // Require prev.has so we don't open and close on the same poll.
+            if (prev.has(p.id) && (p.curPrice >= 0.99 || p.curPrice <= 0.01)) {
+              await trader.onClose(p.id, p.curPrice);
+              currentMap.delete(p.id);
+            }
+          }
+          // Detect exit: position disappeared from smart wallet's live positions
           for (const [id, lastPrice] of prev) {
             if (!currentMap.has(id)) {
               await trader.onClose(id, lastPrice);
@@ -145,8 +173,19 @@ async function runTest() {
         }
 
         trackedPositions.set(wallet.address, currentMap);
-      } catch {
-        // Per-wallet errors are non-fatal
+        failStrikes.delete(wallet.address);
+      } catch (err: unknown) {
+        const strikes = (failStrikes.get(wallet.address) ?? 0) + 1;
+        failStrikes.set(wallet.address, strikes);
+        console.error(`[TEST] Error polling ${wallet.address.slice(0, 10)}: ${(err as Error).message ?? err} (strike ${strikes}/${MAX_STRIKES})`);
+
+        if (strikes >= MAX_STRIKES) {
+          console.warn(`[TEST] Removing ${wallet.address.slice(0, 10)} after ${MAX_STRIKES} consecutive failures.`);
+          await deleteWallet(wallet.address).catch(() => {});
+          smartWallets = smartWallets.filter((w) => w.address !== wallet.address);
+          failStrikes.delete(wallet.address);
+          trackedPositions.delete(wallet.address);
+        }
       }
     }
 
@@ -186,8 +225,46 @@ async function runTest() {
     }
   }
 
+  async function refreshPrices() {
+    const open = await getOpenPaperTrades();
+    if (open.length === 0) return;
+
+    // Group open trades by trackedWallet to minimise API calls
+    const byWallet = new Map<string, string[]>();
+    for (const t of open) {
+      const ids = byWallet.get(t.trackedWallet) ?? [];
+      ids.push(t.conditionId);
+      byWallet.set(t.trackedWallet, ids);
+    }
+
+    const updates: { conditionId: string; currentPrice: number }[] = [];
+    for (const [address, conditionIds] of byWallet) {
+      try {
+        const set = new Set(conditionIds);
+        for await (const page of client.listPositions({ user: address as any, pageSize: 50 })) {
+          for (const pos of page.items) {
+            if (set.has(pos.conditionId)) {
+              updates.push({
+                conditionId: pos.conditionId,
+                currentPrice: parseFloat((pos.curPrice as string | null) ?? '0'),
+              });
+            }
+          }
+        }
+      } catch {
+        // non-fatal — skip this wallet this tick
+      }
+    }
+
+    await updateOpenTradePrices(updates);
+    if (updates.length > 0) {
+      console.log(`[PRICES] Updated current price for ${updates.length} open trade(s).`);
+    }
+  }
+
   await poll();
   setInterval(poll, POLL_INTERVAL_MS);
+  setInterval(refreshPrices, POLL_INTERVAL_MS);
   await scheduleRefresh();
 }
 

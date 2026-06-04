@@ -48,6 +48,24 @@ app.get('/api/trades/summary', async (_req: Request, res: Response) => {
   res.json(await getPaperTradeSummary());
 });
 
+app.get('/api/portfolio', async (_req: Request, res: Response) => {
+  const bankrollUsd = parseFloat(process.env.TEST_BANKROLL_USD ?? '10000');
+  const [open, summary] = await Promise.all([getOpenPaperTrades(), getPaperTradeSummary()]);
+  const portfolioValue = bankrollUsd + summary.totalPnl;
+  const totalDeployed = open.reduce((s, t) => s + t.sizeUsd, 0);
+  const exposurePct = portfolioValue > 0 ? (totalDeployed / portfolioValue) * 100 : 0;
+  res.json({
+    portfolioValue,
+    totalDeployed,
+    exposurePct,
+    openPositions: open.length,
+    totalPnl: summary.totalPnl,
+    winRate: summary.winRate,
+    closedCount: summary.count,
+    bankrollUsd,
+  });
+});
+
 app.get('/api/config', async (_req: Request, res: Response) => {
   const lastRefreshAt = await getConfig('lastRefreshAt');
   res.json({ lastRefreshAt });
@@ -85,8 +103,15 @@ botEvents.on('wallets-updated', (p) => broadcast('wallets-updated', p));
 // ── Start ─────────────────────────────────────────────────────────────────────
 
 export function startApiServer(port: number) {
-  app.listen(port, () => {
+  const server = app.listen(port, () => {
     console.log(`[API] Listening on http://localhost:${port}`);
     console.log(`[API] SSE stream: http://localhost:${port}/api/events`);
+  });
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE') {
+      console.warn(`[API] Port ${port} already in use — API server not started.`);
+    } else {
+      console.error('[API] Server error:', err.message);
+    }
   });
 }

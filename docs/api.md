@@ -138,6 +138,38 @@ Returns aggregate P&L statistics across all closed trades.
 
 ---
 
+### Portfolio
+
+#### `GET /api/portfolio`
+Returns current portfolio state derived from the DB. Values match the `portfolio-updated` SSE event but lag real-time by up to one poll cycle.
+
+**Response**
+```json
+{
+  "portfolioValue": 10412.80,
+  "totalDeployed": 2840.00,
+  "exposurePct": 27.3,
+  "openPositions": 6,
+  "totalPnl": 412.80,
+  "winRate": 0.708,
+  "closedCount": 24,
+  "bankrollUsd": 10000
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `portfolioValue` | number | True portfolio value (`bankrollUsd + totalPnl`) |
+| `totalDeployed` | number | Capital currently at risk in open positions |
+| `exposurePct` | number | `totalDeployed / portfolioValue × 100` |
+| `openPositions` | number | Number of currently open positions |
+| `totalPnl` | number | Total realized P&L across all closed trades |
+| `winRate` | number | Fraction of closed trades that were profitable (0–1) |
+| `closedCount` | number | Total number of closed trades |
+| `bankrollUsd` | number | Initial bankroll from `TEST_BANKROLL_USD` |
+
+---
+
 ### Config
 
 #### `GET /api/config`

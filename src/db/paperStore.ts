@@ -35,6 +35,19 @@ export async function getPaperTradeHistory() {
   });
 }
 
+export async function updateOpenTradePrices(updates: { conditionId: string; currentPrice: number }[]) {
+  if (updates.length === 0) return;
+  const prisma = getPrisma();
+  await Promise.all(
+    updates.map(({ conditionId, currentPrice }) =>
+      prisma.paperTrade.updateMany({
+        where: { conditionId, status: 'open' },
+        data: { currentPrice, priceUpdatedAt: new Date() },
+      }),
+    ),
+  );
+}
+
 export async function getPaperTradeSummary() {
   const trades = await getPrisma().paperTrade.findMany({ where: { status: 'closed' } });
   if (trades.length === 0) return { count: 0, totalPnl: 0, winRate: 0, totalDeployed: 0 };

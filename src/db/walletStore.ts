@@ -46,6 +46,10 @@ export async function getWallet(address: string) {
   return getPrisma().wallet.findUnique({ where: { address } });
 }
 
+export async function deleteWallet(address: string): Promise<void> {
+  await getPrisma().wallet.delete({ where: { address } });
+}
+
 export async function pruneNonSmartWallets(): Promise<number> {
   const { count } = await getPrisma().wallet.deleteMany({
     where: { classification: { not: 'smart' } },

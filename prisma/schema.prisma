@@ -57,8 +57,10 @@ model PaperTrade {
   status          String    // 'open' | 'closed'
   exitPrice       Float?
   pnl             Float?
+  currentPrice    Float?
   openedAt        DateTime  @default(now())
   closedAt        DateTime?
+  priceUpdatedAt  DateTime?
 
   @@index([status])
   @@index([trackedWallet])
